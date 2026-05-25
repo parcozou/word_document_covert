@@ -76,6 +76,8 @@ The included `Dockerfile` can be deployed on a container host such as Render, Ra
 
 For local testing, a `.env` file in this folder is loaded automatically. Do not upload `.env` or any raw R2 credential notes to a public repository; on the deployment host, copy the same values into its protected environment-secret settings.
 
+For this standalone GitHub repository, leave Render's **Root Directory** setting blank because `Dockerfile` and `app.py` are already at the repository root. In Render **Settings**, set **Health Check Path** to `/health`. After deployment, opening the service URL should return a short JSON service-status response; `/health` should return a `200` response.
+
 ## Configure Coze
 
 1. Deploy this API to a public HTTPS domain.
