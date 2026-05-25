@@ -12,9 +12,12 @@ import uuid
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
 
 from docx_converter import convert_markdown_to_docx, safe_file_stem
 
+
+load_dotenv()
 
 GENERATED_DIR = Path(os.getenv("GENERATED_DIR", "generated_files")).resolve()
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
@@ -27,7 +30,8 @@ app = FastAPI(
     description="Creates a Word report with native tables and returns a download link.",
     version="1.0.0",
 )
-app.mount("/files", StaticFiles(directory=str(GENERATED_DIR)), name="files")
+if STORAGE_MODE == "local":
+    app.mount("/files", StaticFiles(directory=str(GENERATED_DIR)), name="files")
 
 
 class DocxRequest(BaseModel):
@@ -96,7 +100,9 @@ def _s3_download_url(local_file: Path, file_name: str) -> str:
 
 def _publish_file(local_file: Path, file_name: str) -> str:
     if STORAGE_MODE == "s3":
-        return _s3_download_url(local_file, file_name)
+        download_url = _s3_download_url(local_file, file_name)
+        local_file.unlink(missing_ok=True)
+        return download_url
     if STORAGE_MODE != "local":
         raise RuntimeError("STORAGE_MODE must be either local or s3.")
     return f"{PUBLIC_BASE_URL}/files/{quote(file_name)}"

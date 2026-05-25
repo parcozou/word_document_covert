@@ -70,9 +70,11 @@ Use `STORAGE_MODE=local` only where the deployed service retains its `generated_
 
 ### Option B: Production With Object Storage
 
-Set `STORAGE_MODE=s3` and configure the S3-compatible values shown in `.env.example`. With a private bucket, omit `S3_PUBLIC_BASE_URL` and the plugin returns an expiring signed download link. With a public/custom-domain bucket, set `S3_PUBLIC_BASE_URL` for stable URLs.
+Set `STORAGE_MODE=s3` and configure the S3-compatible values shown in `.env.example`. With a private bucket, omit `S3_PUBLIC_BASE_URL` and the plugin returns an expiring signed download link. With a public/custom-domain bucket, set `S3_PUBLIC_BASE_URL` for stable URLs. In `s3` mode, temporary local copies are deleted after upload and the local `/files` route is not exposed.
 
 The included `Dockerfile` can be deployed on a container host such as Render, Railway, or Cloud Run. Store API and object-storage credentials as environment secrets.
+
+For local testing, a `.env` file in this folder is loaded automatically. Do not upload `.env` or any raw R2 credential notes to a public repository; on the deployment host, copy the same values into its protected environment-secret settings.
 
 ## Configure Coze
 
@@ -85,7 +87,7 @@ The included `Dockerfile` can be deployed on a container host such as Render, Ra
 
 Full setup instructions are in [Coze Deployment Guide.md](./Coze%20Deployment%20Guide.md). The applicable official Coze documentation is [Create a plugin by importing a JSON or YAML file](https://www.coze.com/open/docs/guides/plugin_import) and [Plugin node](https://www.coze.com/open/docs/guides/plugin_node). The local-plugin callback guide is a different API integration route and is not required for this hosted DOCX conversion plugin.
 
-## Local Verification With The Supplied Payload
+## Local Verification
 
 After dependencies are installed, generate a quick table-only audit:
 
@@ -93,10 +95,10 @@ After dependencies are installed, generate a quick table-only audit:
 python test_from_payload.py --skip-images
 ```
 
-Then run without `--skip-images` to check chart retrieval:
+The command uses a self-contained Markdown/table payload. To validate an exported Coze payload, provide the JSON file explicitly:
 
 ```bash
-python test_from_payload.py
+python test_from_payload.py --input path/to/payload.json
 ```
 
 Open the generated file under `generated_files/` and verify the report tables are editable. The test fails if no native Word tables are created.

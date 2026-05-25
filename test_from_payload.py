@@ -11,12 +11,27 @@ from docx import Document
 from docx_converter import convert_markdown_to_docx, safe_file_stem
 
 
+DEFAULT_SAMPLE_PAYLOAD = {
+    "formatted_markdown": (
+        "# DOCX Conversion Check\n\n"
+        "## 1. Summary\n\n"
+        "| Metric | Value |\n"
+        "| --- | ---: |\n"
+        "| Revenue | RMB 100.0m |\n"
+        "| Margin | 25.0% |\n\n"
+        "## 2. Conclusion\n\n"
+        "The standalone validation payload confirms native table conversion."
+    ),
+    "title": "DOCX Conversion Check",
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path(__file__).resolve().parent.parent / "Untitled-1.md",
+        help="Optional JSON payload file with formatted_markdown and title fields.",
     )
     parser.add_argument(
         "--output-dir",
@@ -26,7 +41,11 @@ def main() -> None:
     parser.add_argument("--skip-images", action="store_true")
     args = parser.parse_args()
 
-    payload = json.loads(args.input.read_text(encoding="utf-8"))
+    payload = (
+        json.loads(args.input.read_text(encoding="utf-8"))
+        if args.input
+        else DEFAULT_SAMPLE_PAYLOAD
+    )
     output = args.output_dir / f"{safe_file_stem(payload['title'])}_sample.docx"
     result = convert_markdown_to_docx(
         payload["formatted_markdown"],

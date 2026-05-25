@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+.env
+R2.txt
+generated_files/
+.packages/

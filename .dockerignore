@@ -1,0 +1,8 @@
+.git/
+.gitignore
+.env
+.venv/
+.packages/
+R2.txt
+__pycache__/
+generated_files/
