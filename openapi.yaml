@@ -1,0 +1,88 @@
+openapi: 3.0.3
+info:
+  title: Markdown Report to DOCX
+  version: 1.0.0
+  description: Generate a downloadable Word report containing editable tables and permitted chart images.
+servers:
+  - url: https://YOUR-DOCX-PLUGIN-DOMAIN.example.com
+paths:
+  /generate-docx:
+    post:
+      operationId: generateDocxReport
+      summary: Generate an editable DOCX report from Markdown
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocxRequest'
+      responses:
+        '200':
+          description: Generated document link and conversion statistics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocxResponse'
+        '400':
+          description: Unsupported format or invalid request.
+        '401':
+          description: Invalid API key.
+        '500':
+          description: Generation or storage error.
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    DocxRequest:
+      type: object
+      required:
+        - formatted_markdown
+        - title
+        - to_format
+      properties:
+        formatted_markdown:
+          type: string
+          description: Full Markdown report, with pipe-table syntax and ECharts image Markdown.
+        title:
+          type: string
+          description: Document title used for metadata and the download file name.
+        to_format:
+          type: string
+          enum: [docx]
+          default: docx
+        include_images:
+          type: boolean
+          default: true
+          description: Embed permitted remote PNG charts where accessible.
+    DocxResponse:
+      type: object
+      required:
+        - download_url
+        - file_name
+        - table_count
+        - image_count
+        - skipped_image_count
+        - generated_at_utc
+        - message
+      properties:
+        download_url:
+          type: string
+          format: uri
+          description: Downloadable DOCX file URL to display to the user.
+        file_name:
+          type: string
+        table_count:
+          type: integer
+        image_count:
+          type: integer
+        skipped_image_count:
+          type: integer
+        generated_at_utc:
+          type: string
+        message:
+          type: string
