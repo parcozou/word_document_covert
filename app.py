@@ -108,6 +108,16 @@ def _publish_file(local_file: Path, file_name: str) -> str:
     return f"{PUBLIC_BASE_URL}/files/{quote(file_name)}"
 
 
+@app.get("/")
+def root() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "service": "Markdown Report to DOCX Plugin",
+        "health_check": "/health",
+        "generate_docx": "/generate-docx",
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "storage_mode": STORAGE_MODE}
