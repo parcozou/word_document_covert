@@ -4,7 +4,7 @@ info:
   version: 1.0.0
   description: Generate a downloadable Word report containing editable tables and permitted chart images.
 servers:
-  - url: https://YOUR-DOCX-PLUGIN-DOMAIN.example.com
+  - url: https://word-document-covert.onrender.com
 paths:
   /generate-docx:
     post:
