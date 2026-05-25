@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 import os
+import subprocess
+import sys
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException
@@ -24,6 +26,10 @@ GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
 STORAGE_MODE = os.getenv("STORAGE_MODE", "local").lower()
 DOCX_API_KEY = os.getenv("DOCX_API_KEY", "")
+FINALIZE_FIELDS = os.getenv("FINALIZE_FIELDS", "true").lower() not in {"0", "false", "no"}
+FINALIZER_PYTHON = os.getenv("DOCX_FINALIZER_PYTHON", sys.executable)
+FINALIZER_SCRIPT = Path(__file__).with_name("finalize_docx.py")
+FIELD_FINALIZATION_TIMEOUT = int(os.getenv("FIELD_FINALIZATION_TIMEOUT", "90"))
 
 app = FastAPI(
     title="Markdown Report to DOCX Plugin",
@@ -108,6 +114,34 @@ def _publish_file(local_file: Path, file_name: str) -> str:
     return f"{PUBLIC_BASE_URL}/files/{quote(file_name)}"
 
 
+def _finalize_fields(local_file: Path) -> None:
+    if not FINALIZE_FIELDS:
+        return
+    command = [
+        FINALIZER_PYTHON,
+        str(FINALIZER_SCRIPT),
+        str(local_file),
+        "--timeout",
+        str(min(FIELD_FINALIZATION_TIMEOUT, 60)),
+    ]
+    soffice_path = os.getenv("SOFFICE_PATH")
+    if soffice_path:
+        command.extend(["--soffice", soffice_path])
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=FIELD_FINALIZATION_TIMEOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "unknown LibreOffice error").strip()
+        raise RuntimeError(f"Contents-page finalization failed: {detail}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Contents-page finalization timed out.") from exc
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {
@@ -120,7 +154,11 @@ def root() -> dict[str, str]:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "storage_mode": STORAGE_MODE}
+    return {
+        "status": "ok",
+        "storage_mode": STORAGE_MODE,
+        "field_finalization": "enabled" if FINALIZE_FIELDS else "disabled",
+    }
 
 
 @app.post("/generate-docx", response_model=DocxResponse)
@@ -139,6 +177,7 @@ def generate_docx(payload: DocxRequest, x_api_key: Optional[str] = Header(None))
             local_file,
             include_images=payload.include_images,
         )
+        _finalize_fields(local_file)
         download_url = _publish_file(local_file, file_name)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DOCX generation failed: {exc}") from exc
@@ -150,5 +189,5 @@ def generate_docx(payload: DocxRequest, x_api_key: Optional[str] = Header(None))
         image_count=result.image_count,
         skipped_image_count=result.skipped_image_count,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
-        message="DOCX report generated with editable Word tables.",
+        message="DOCX report generated with editable Word tables and finalized contents.",
     )

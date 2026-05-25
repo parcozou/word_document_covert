@@ -7,7 +7,7 @@ This plugin turns the combined report Markdown received by the Coze document nod
 Coze calls a public HTTPS API imported as a custom plugin through `openapi.yaml`:
 
 1. The LLM report node passes `formatted_markdown`, `title`, and `to_format`.
-2. `POST /generate-docx` converts headings, paragraphs, lists, hyperlinks, chart images, and Markdown tables into DOCX content.
+2. `POST /generate-docx` converts headings, paragraphs, lists, hyperlinks, chart images, and Markdown tables into DOCX content, then refreshes the live Contents field in headless LibreOffice before delivery.
 3. The service stores the file in object storage for production, or exposes a local file URL for initial testing.
 4. The plugin returns `download_url`, which the Coze final output node can display as the Word report download link.
 
@@ -44,10 +44,22 @@ The API returns:
 
 ## Formatting Behaviour
 
-- Markdown pipe tables become editable Word tables with a shaded header row and fixed column geometry.
+- Each generated file begins with a redesigned analytical cover page centred vertically and horizontally on the page, followed by a populated contents section backed by a Word TOC field; the academic contribution and declaration forms are intentionally omitted.
+- The report follows the supplied formal-report model: A4 pages, Times New Roman body text, justified 1.5-line paragraphs, black numbered heading hierarchy, restrained centred pagination, and serif table typography.
+- Markdown pipe tables become editable Word tables with 12 pt, single-spaced cell text and zero paragraph spacing. Each table has 1.5 pt top and bottom rules, with a 0.5 pt separator beneath its first row.
+- Rendered list-item paragraphs are justified, matching the report body alignment.
 - LLM output is normalised before conversion so a heading or paragraph immediately after a table is not incorrectly inserted as an additional table row.
 - Section dividers written as `---` are separated from preceding narrative paragraphs so Markdown does not interpret analytical prose as a level-two heading.
-- Headings and body copy use a restrained business-report style suitable for equity research output.
+- A top-level Markdown title is used for the redesigned cover and retained as the first report-section heading in the body and contents hierarchy.
+- Each analytical report title is formatted as Heading 1; numbered main sections are Heading 2; numbered subsections are Heading 3. Later reports and each main section after Section 1 begin on a new page, while Section 1 remains attached to its report title.
+- Markdown horizontal-rule dividers are treated as structural separators only and are not rendered as blank spacing paragraphs.
+- The Docker deployment finalizes the live Contents field in headless LibreOffice before publishing the DOCX, saving dotted leaders and page numbers into the download and switching off forced refresh on open. This prevents Word's field-update warning for ordinary downloads.
+- For a final assessed/submitted copy, open the downloaded report in Microsoft Word, use **References > Update Table > Update entire table** once after any last edits, then save. Word and LibreOffice can paginate unusually dense or image-heavy reports slightly differently.
+- Chart PNGs are embedded when `include_images` is `true` and the supplied Coze HTTPS URLs remain accessible; the response counts skipped images so missing evidence is visible during testing.
+- Embedded charts do not receive a second generated caption or graph title in the document; any title already rendered inside a supplied PNG remains part of that source image.
+- A standalone Markdown chart followed by an italicised `Note:` is rendered in figure-first order, with the note directly beneath the chart and the analytical paragraph after the note.
+- To remove titles already drawn inside PNGs, deploy the updated ECharts code nodes and rerun the chart workflow before generating the DOCX; the converter deliberately does not crop or modify source evidence images.
+- Numbered citation markers such as `[1]` are rendered as superscript internal Word links to reference-list bookmarks when a corresponding numbered item appears in the report reference list.
 - URLs in Markdown links remain clickable in Word.
 - ECharts images are embedded only from HTTPS hosts listed in `IMAGE_HOST_ALLOWLIST`; the default accepts the Coze chart-resource host shown in the sample payload.
 - Accepted chart images are decoded and re-encoded as clean PNG files before insertion, reducing image-encoding compatibility problems.
@@ -73,6 +85,14 @@ Use `STORAGE_MODE=local` only where the deployed service retains its `generated_
 Set `STORAGE_MODE=s3` and configure the S3-compatible values shown in `.env.example`. With a private bucket, omit `S3_PUBLIC_BASE_URL` and the plugin returns an expiring signed download link. With a public/custom-domain bucket, set `S3_PUBLIC_BASE_URL` for stable URLs. In `s3` mode, temporary local copies are deleted after upload and the local `/files` route is not exposed.
 
 The included `Dockerfile` can be deployed on a container host such as Render, Railway, or Cloud Run. Store API and object-storage credentials as environment secrets.
+
+The Dockerfile installs LibreOffice and enables `FINALIZE_FIELDS=true`; this is required for a ready-formatted Contents page without an opening update prompt. For local Windows API testing outside Docker, set:
+
+```powershell
+$env:FINALIZE_FIELDS = "true"
+$env:SOFFICE_PATH = "C:\Program Files\LibreOffice\program\soffice.exe"
+$env:DOCX_FINALIZER_PYTHON = "C:\Program Files\LibreOffice\program\python.exe"
+```
 
 For local testing, a `.env` file in this folder is loaded automatically. Do not upload `.env` or any raw R2 credential notes to a public repository; on the deployment host, copy the same values into its protected environment-secret settings.
 
