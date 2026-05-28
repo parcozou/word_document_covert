@@ -2,7 +2,7 @@
 
 ## 1. What This Plugin Does
 
-The plugin receives the completed report as Markdown, converts Markdown tables into editable Word tables, embeds permitted chart images, applies a formal A4 report format with a vertically and horizontally centred cover and populated contents page, finalizes the Contents field in headless LibreOffice, stores the generated `.docx`, and returns a clickable download URL. Tables use 12 pt single-spaced cells with 1.5 pt outer horizontal rules and a 0.5 pt rule beneath the first row; list paragraphs are justified. It applies a three-level report hierarchy (report title, main section, subsection), keeps Section 1 with its report title, and starts later reports and subsequent main sections on new pages. Chart notes render directly under the relevant chart, rather than before it, and Markdown horizontal rules do not create blank separator paragraphs. It suppresses duplicate generated chart titles and converts numbered in-text citations into superscript internal Word links to their numbered reference bookmarks. The converter deliberately excludes contribution-statement and declaration forms. The downloaded DOCX contains stored dotted leaders and page numbers and does not require Word to refresh fields on opening. For the final submitted file, update the full Contents table once in Microsoft Word after any last edits because Word and LibreOffice may paginate a dense report slightly differently.
+The plugin receives the completed report as Markdown, converts Markdown tables into editable Word tables, embeds permitted chart images, applies a formal A4 report format with a vertically and horizontally centred cover and populated contents page, stores the generated `.docx`, and returns a clickable download URL. Tables use 12 pt single-spaced cells with 1.5 pt outer horizontal rules and a 0.5 pt rule beneath the first row; list paragraphs are justified. It applies a three-level report hierarchy (report title, main section, subsection), keeps Section 1 with its report title, and starts later reports and subsequent main sections on new pages. Chart notes render directly under the relevant chart, rather than before it, and Markdown horizontal rules do not create blank separator paragraphs. It suppresses duplicate generated chart titles and converts numbered in-text citations into superscript internal Word links to their numbered reference bookmarks. The converter deliberately excludes contribution-statement and declaration forms. On 512MB Render instances, the recommended low-memory mode avoids headless LibreOffice and uses stored contents entries to prevent field-refresh prompts while preserving the full report body, editable tables, embedded charts and internal reference links.
 
 This should be deployed as a public HTTPS API and imported into Coze as a cloud plugin. A Coze code node is not suitable for the final document download step because the Word file needs a stable or time-limited public URL after the workflow finishes.
 
@@ -23,7 +23,7 @@ Use the following deployment files in this folder:
 | --- | --- |
 | `app.py` | Public FastAPI endpoint: `POST /generate-docx` |
 | `docx_converter.py` | Markdown-to-DOCX conversion, table and chart handling |
-| `finalize_docx.py` | Headless LibreOffice Contents and page-field finalization |
+| `finalize_docx.py` | Optional headless LibreOffice Contents and page-field finalization for larger instances |
 | `requirements.txt` | Python dependencies |
 | `Dockerfile` | Container deployment configuration |
 | `.env.example` | Required runtime settings |
@@ -55,7 +55,8 @@ pip install -r requirements.txt
 $env:STORAGE_MODE = "local"
 $env:PUBLIC_BASE_URL = "http://localhost:8000"
 $env:DOCX_API_KEY = "replace-with-a-long-random-secret"
-$env:FINALIZE_FIELDS = "true"
+$env:FINALIZE_FIELDS = "false"
+$env:DOCX_FINALIZATION_MODE = "static"
 $env:SOFFICE_PATH = "C:\Program Files\LibreOffice\program\soffice.exe"
 $env:DOCX_FINALIZER_PYTHON = "C:\Program Files\LibreOffice\program\python.exe"
 uvicorn app:app --host 0.0.0.0 --port 8000
@@ -96,7 +97,9 @@ STORAGE_MODE=local
 PUBLIC_BASE_URL=https://your-api-domain.example.com
 DOCX_API_KEY=replace-with-a-long-random-token
 IMAGE_HOST_ALLOWLIST=lf-bot-studio-plugin-resource.coze.cn
-FINALIZE_FIELDS=true
+FINALIZE_FIELDS=false
+DOCX_FINALIZATION_MODE=static
+DOCX_UPDATE_FIELDS_ON_OPEN=false
 ```
 
 ### 4.2 Recommended Production Setup
@@ -117,7 +120,12 @@ S3_KEY_PREFIX=generated-docx
 USE_PROXY_DOWNLOAD_URLS=true
 DOWNLOAD_LINK_EXPIRY_SECONDS=7776000
 DOWNLOAD_LINK_SECRET=replace-with-a-long-random-token-or-use-DOCX_API_KEY
-FINALIZE_FIELDS=true
+FINALIZE_FIELDS=false
+DOCX_FINALIZATION_MODE=static
+DOCX_UPDATE_FIELDS_ON_OPEN=false
+MALLOC_ARENA_MAX=2
+DOCX_IMAGE_MAX_WIDTH_PX=1400
+DOCX_IMAGE_MAX_HEIGHT_PX=1000
 ```
 
 Leave `S3_PUBLIC_BASE_URL` unset for private reports. When it is unset and `USE_PROXY_DOWNLOAD_URLS=true`, the plugin returns a link like `/download/<file_name>?expires=...&signature=...`. When the user opens that link, the API verifies the signature and streams the file from R2/S3. The default `DOWNLOAD_LINK_EXPIRY_SECONDS=7776000` equals 90 days.
@@ -150,7 +158,7 @@ Any public container host that runs the supplied `Dockerfile` can host this serv
 8. Deploy the service and copy its public HTTPS domain, for example `https://your-service.onrender.com`.
 9. Open `https://your-service.onrender.com/health`. It should return `{"status":"ok", ...}`.
 
-The Dockerfile installs LibreOffice for Contents finalization and starts Uvicorn on the `PORT` environment variable expected by a hosted web service. Do not disable `FINALIZE_FIELDS` in production unless you deliberately accept an unfinalized Contents field that must be updated in Word.
+The Dockerfile installs LibreOffice for optional Contents finalization and starts Uvicorn on the `PORT` environment variable expected by a hosted web service. For 512MB Render instances, keep `FINALIZE_FIELDS=false` and `DOCX_FINALIZATION_MODE=static`; this avoids the LibreOffice memory spike while still returning a complete DOCX. Use `DOCX_FINALIZATION_MODE=libreoffice` only after upgrading the instance memory.
 
 On Render's free web-service plan, an idle service spins down after 15 minutes without inbound traffic and displays an application-loading page while waking; Render states that wake-up normally takes about one minute. If `/health` remains on that page for more than a few minutes, inspect the Render **Events** deployment log and **Logs** page for a startup or port-binding error.
 
@@ -259,6 +267,7 @@ Before using the workflow for a final report, run one full case and confirm:
 | Coze import rejects the plugin URL | `openapi.yaml` still contains a placeholder, `localhost`, or an IP address | Replace it with the deployed HTTPS domain |
 | Debug returns `401` | Coze service-token value differs from `DOCX_API_KEY` | Use the same secret in Coze and the host environment |
 | Link is returned but the file cannot be downloaded | `PUBLIC_BASE_URL` is incorrect or local storage is not persistent | Correct the public domain or use `STORAGE_MODE=s3` |
+| Coze receives `502` and Render says out of memory | A full report plus LibreOffice field finalization exceeds the 512MB instance limit | Keep `FINALIZE_FIELDS=false`, `DOCX_FINALIZATION_MODE=static`, and the image-size environment variables enabled, or upgrade Render memory |
 | Charts are missing in Word | Chart host is not allowed or the source URL has expired | Add only the trusted chart host to `IMAGE_HOST_ALLOWLIST` and regenerate |
 | A chart still shows a title inside the image | The PNG was created by an older ECharts node whose `option` included `title` | Update the ECharts node, rerun Chart Master to create new PNG links, and then regenerate the DOCX |
 | A report table is not editable | Input did not contain valid Markdown pipe-table syntax | Check the final Markdown supplied to `formatted_markdown` |

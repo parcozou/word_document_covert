@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from datetime import date
-from io import BytesIO
 from pathlib import Path
 import os
 import re
+import tempfile
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -29,6 +30,9 @@ TABLE_WIDTH_IN = 5.75
 TABLE_WIDTH_DXA = 8280
 TABLE_INDENT_DXA = 0
 DEFAULT_IMAGE_HOSTS = "lf-bot-studio-plugin-resource.coze.cn"
+DEFAULT_IMAGE_MAX_WIDTH_PX = 1400
+DEFAULT_IMAGE_MAX_HEIGHT_PX = 1000
+DEFAULT_IMAGE_DOWNLOAD_MAX_BYTES = 12 * 1024 * 1024
 TABLE_DELIMITER_CELL = re.compile(r"^:?-{3,}:?$")
 LIST_ITEM_LINE = re.compile(r"^\s*(?:[-+*]\s+|\d+[.)]\s+)")
 REFERENCE_HEADING_LINE = re.compile(
@@ -241,6 +245,14 @@ def _safe_hosts() -> set[str]:
     return {host.strip().lower() for host in configured.split(",") if host.strip()}
 
 
+def _positive_int_from_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def _font_name(element, name: str = REPORT_FONT) -> None:
     element.font.name = name
     properties = element._element.get_or_add_rPr()
@@ -318,7 +330,12 @@ def _set_update_fields(document: Document) -> None:
     if update_fields is None:
         update_fields = OxmlElement("w:updateFields")
         settings.append(update_fields)
-    update_fields.set(qn("w:val"), "true")
+    should_prompt = os.getenv("DOCX_UPDATE_FIELDS_ON_OPEN", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    update_fields.set(qn("w:val"), "true" if should_prompt else "false")
 
 
 def _clear_paragraph(paragraph) -> None:
@@ -737,10 +754,46 @@ def _add_rule(document: Document) -> None:
     paragraph.paragraph_format.space_after = Pt(4)
 
 
-def _download_image(url: str) -> BytesIO | None:
+def _optimise_image_file(source_path: Path) -> Path | None:
+    max_width = _positive_int_from_env(
+        "DOCX_IMAGE_MAX_WIDTH_PX", DEFAULT_IMAGE_MAX_WIDTH_PX
+    )
+    max_height = _positive_int_from_env(
+        "DOCX_IMAGE_MAX_HEIGHT_PX", DEFAULT_IMAGE_MAX_HEIGHT_PX
+    )
+    try:
+        with Image.open(source_path) as image:
+            needs_resize = image.width > max_width or image.height > max_height
+            if image.format == "PNG" and not needs_resize:
+                return source_path
+
+            image.load()
+            image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            if image.mode not in {"RGB", "RGBA", "L", "LA", "P"}:
+                image = image.convert("RGBA" if "A" in image.mode else "RGB")
+
+            output = tempfile.NamedTemporaryFile(
+                prefix="docx_chart_", suffix=".png", delete=False
+            )
+            output_path = Path(output.name)
+            output.close()
+            image.save(output_path, format="PNG", optimize=True, compress_level=9)
+            source_path.unlink(missing_ok=True)
+            return output_path
+    except (UnidentifiedImageError, OSError):
+        source_path.unlink(missing_ok=True)
+        return None
+
+
+def _download_image(url: str) -> Path | None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _safe_hosts():
         return None
+    source_file = tempfile.NamedTemporaryFile(
+        prefix="docx_chart_source_", suffix=".img", delete=False
+    )
+    source_path = Path(source_file.name)
+    source_file.close()
     try:
         response = requests.get(
             url,
@@ -750,25 +803,37 @@ def _download_image(url: str) -> BytesIO | None:
         )
         response.raise_for_status()
         if not response.headers.get("Content-Type", "").lower().startswith("image/"):
+            source_path.unlink(missing_ok=True)
             return None
-        maximum_bytes = 10 * 1024 * 1024
-        content = bytearray()
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            content.extend(chunk)
-            if len(content) > maximum_bytes:
-                return None
-        source_image = BytesIO(bytes(content))
-        try:
-            with Image.open(source_image) as image:
-                image.load()
-                normalized = BytesIO()
-                image.save(normalized, format="PNG")
-                normalized.seek(0)
-                return normalized
-        except (UnidentifiedImageError, OSError):
-            return None
+        maximum_bytes = _positive_int_from_env(
+            "DOCX_IMAGE_DOWNLOAD_MAX_BYTES", DEFAULT_IMAGE_DOWNLOAD_MAX_BYTES
+        )
+        downloaded = 0
+        with source_path.open("wb") as destination:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > maximum_bytes:
+                    source_path.unlink(missing_ok=True)
+                    return None
+                destination.write(chunk)
+        return _optimise_image_file(source_path)
     except requests.RequestException:
+        source_path.unlink(missing_ok=True)
         return None
+
+
+def _remove_temp_image(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        temp_dir = Path(tempfile.gettempdir()).resolve()
+        resolved = path.resolve()
+        if temp_dir in resolved.parents or resolved.parent == temp_dir:
+            resolved.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _render_image(
@@ -776,8 +841,8 @@ def _render_image(
 ) -> None:
     caption = image_tag.get("alt", "").strip() or "Chart"
     source = image_tag.get("src", "")
-    content = _download_image(source) if include_images else None
-    if content is None:
+    image_path = _download_image(source) if include_images else None
+    if image_path is None:
         result.skipped_image_count += 1
         note = document.add_paragraph()
         note.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -792,8 +857,12 @@ def _render_image(
     paragraph.paragraph_format.space_before = Pt(8)
     paragraph.paragraph_format.space_after = Pt(8)
     run = paragraph.add_run()
-    run.add_picture(content, width=Inches(TABLE_WIDTH_IN))
-    result.image_count += 1
+    try:
+        run.add_picture(str(image_path), width=Inches(TABLE_WIDTH_IN))
+        result.image_count += 1
+    finally:
+        _remove_temp_image(image_path)
+        gc.collect()
 
 
 def _render_table(
