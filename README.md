@@ -7,7 +7,7 @@ This plugin turns the combined report Markdown received by the Coze document nod
 Coze calls a public HTTPS API imported as a custom plugin through `openapi.yaml`:
 
 1. The LLM report node passes `formatted_markdown`, `title`, and `to_format`.
-2. `POST /generate-docx` converts headings, paragraphs, lists, hyperlinks, chart images, and Markdown tables into DOCX content, then refreshes the live Contents field in headless LibreOffice before delivery.
+2. `POST /generate-docx` converts headings, paragraphs, lists, hyperlinks, chart images, and Markdown tables into DOCX content. Server-side Word-field finalization is disabled by default for stable low-memory deployment; users update the Contents field manually in Microsoft Word after download.
 3. The service stores the file in object storage for production, or exposes a local file URL for initial testing.
 4. The plugin returns `download_url`, which the Coze final output node can display as the Word report download link.
 
@@ -53,8 +53,8 @@ The API returns:
 - A top-level Markdown title is used for the redesigned cover and retained as the first report-section heading in the body and contents hierarchy.
 - Each analytical report title is formatted as Heading 1; numbered main sections are Heading 2; numbered subsections are Heading 3. Later reports and each main section after Section 1 begin on a new page, while Section 1 remains attached to its report title.
 - Markdown horizontal-rule dividers are treated as structural separators only and are not rendered as blank spacing paragraphs.
-- The Docker deployment finalizes the live Contents field in headless LibreOffice before publishing the DOCX, saving dotted leaders and page numbers into the download and switching off forced refresh on open. This prevents Word's field-update warning for ordinary downloads.
-- For a final assessed/submitted copy, open the downloaded report in Microsoft Word, use **References > Update Table > Update entire table** once after any last edits, then save. Word and LibreOffice can paginate unusually dense or image-heavy reports slightly differently.
+- The generated Contents section is backed by a native Word TOC field. Server-side field finalization is disabled by default on Render, so the downloaded report may need a manual Contents update in Microsoft Word.
+- For a final assessed/submitted copy, open the downloaded report in Microsoft Word, go to the **Contents** section, right-click inside the table of contents, choose **Update Field**, select **Update entire table**, then save.
 - Chart PNGs are embedded when `include_images` is `true` and the supplied Coze HTTPS URLs remain accessible; the response counts skipped images so missing evidence is visible during testing.
 - Embedded charts do not receive a second generated caption or graph title in the document; any title already rendered inside a supplied PNG remains part of that source image.
 - A standalone Markdown chart followed by an italicised `Note:` is rendered in figure-first order, with the note directly beneath the chart and the analytical paragraph after the note.
@@ -86,7 +86,7 @@ Set `STORAGE_MODE=s3` and configure the S3-compatible values shown in `.env.exam
 
 The included `Dockerfile` can be deployed on a container host such as Render, Railway, or Cloud Run. Store API and object-storage credentials as environment secrets.
 
-The Dockerfile installs LibreOffice and enables `FINALIZE_FIELDS=true`; this is required for a ready-formatted Contents page without an opening update prompt. For local Windows API testing outside Docker, set:
+The Dockerfile keeps `FINALIZE_FIELDS=false` by default to avoid LibreOffice memory pressure on 512MB Render instances. If you intentionally want to test server-side field finalization on a machine with enough memory, set:
 
 ```powershell
 $env:FINALIZE_FIELDS = "true"
