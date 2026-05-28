@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 import os
 import re
-import tempfile
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -20,6 +20,7 @@ from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.shared import Inches, Pt, RGBColor
 import markdown
+from PIL import Image, UnidentifiedImageError
 import requests
 
 
@@ -736,58 +737,37 @@ def _add_rule(document: Document) -> None:
     paragraph.paragraph_format.space_after = Pt(4)
 
 
-def _image_suffix(content_type: str, url_path: str) -> str:
-    suffix = Path(url_path).suffix.lower()
-    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"}:
-        return suffix
-    content_type = content_type.lower().split(";", 1)[0].strip()
-    return {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/gif": ".gif",
-        "image/bmp": ".bmp",
-        "image/tiff": ".tiff",
-    }.get(content_type, ".img")
-
-
-def _download_image(url: str) -> Path | None:
+def _download_image(url: str) -> BytesIO | None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or (parsed.hostname or "").lower() not in _safe_hosts():
         return None
-    temp_path: Path | None = None
     try:
-        with requests.get(
+        response = requests.get(
             url,
             timeout=(4, 15),
             stream=True,
             headers={"User-Agent": "Coze-DOCX-Report-Renderer/1.0"},
-        ) as response:
-            response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "")
-            if not content_type.lower().startswith("image/"):
+        )
+        response.raise_for_status()
+        if not response.headers.get("Content-Type", "").lower().startswith("image/"):
+            return None
+        maximum_bytes = 10 * 1024 * 1024
+        content = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            content.extend(chunk)
+            if len(content) > maximum_bytes:
                 return None
-            maximum_bytes = 10 * 1024 * 1024
-            total_bytes = 0
-            oversized = False
-            suffix = _image_suffix(content_type, parsed.path)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-                temp_path = Path(temp_file.name)
-                for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    total_bytes += len(chunk)
-                    if total_bytes > maximum_bytes:
-                        oversized = True
-                        break
-                    temp_file.write(chunk)
-            if oversized:
-                if temp_path is not None:
-                    temp_path.unlink(missing_ok=True)
-                return None
-            return temp_path
-    except (OSError, requests.RequestException):
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
+        source_image = BytesIO(bytes(content))
+        try:
+            with Image.open(source_image) as image:
+                image.load()
+                normalized = BytesIO()
+                image.save(normalized, format="PNG")
+                normalized.seek(0)
+                return normalized
+        except (UnidentifiedImageError, OSError):
+            return None
+    except requests.RequestException:
         return None
 
 
@@ -796,8 +776,8 @@ def _render_image(
 ) -> None:
     caption = image_tag.get("alt", "").strip() or "Chart"
     source = image_tag.get("src", "")
-    image_path = _download_image(source) if include_images else None
-    if image_path is None:
+    content = _download_image(source) if include_images else None
+    if content is None:
         result.skipped_image_count += 1
         note = document.add_paragraph()
         note.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -807,25 +787,13 @@ def _render_image(
         run.italic = True
         run.font.size = Pt(10)
         return
-    try:
-        paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        paragraph.paragraph_format.space_before = Pt(8)
-        paragraph.paragraph_format.space_after = Pt(8)
-        run = paragraph.add_run()
-        run.add_picture(str(image_path), width=Inches(TABLE_WIDTH_IN))
-        result.image_count += 1
-    except Exception:
-        result.skipped_image_count += 1
-        note = document.add_paragraph()
-        note.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        note.paragraph_format.space_after = Pt(5)
-        run = note.add_run(f"[Figure unavailable: {caption}]")
-        _font_name(run)
-        run.italic = True
-        run.font.size = Pt(10)
-    finally:
-        image_path.unlink(missing_ok=True)
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.paragraph_format.space_before = Pt(8)
+    paragraph.paragraph_format.space_after = Pt(8)
+    run = paragraph.add_run()
+    run.add_picture(content, width=Inches(TABLE_WIDTH_IN))
+    result.image_count += 1
 
 
 def _render_table(

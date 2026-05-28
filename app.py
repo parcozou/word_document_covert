@@ -6,15 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
-import gc
 import hashlib
 import hmac
-import json
 import os
-import re
 import subprocess
 import sys
-import threading
 import time
 import uuid
 
@@ -24,6 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+from docx_converter import convert_markdown_to_docx, safe_file_stem
+
 
 load_dotenv()
 
@@ -32,19 +30,15 @@ GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
 STORAGE_MODE = os.getenv("STORAGE_MODE", "local").lower()
 DOCX_API_KEY = os.getenv("DOCX_API_KEY", "")
-FINALIZE_FIELDS = os.getenv("FINALIZE_FIELDS", "true").lower() not in {"0", "false", "no"}
+FINALIZE_FIELDS = os.getenv("FINALIZE_FIELDS", "false").lower() not in {"0", "false", "no"}
 FINALIZER_PYTHON = os.getenv("DOCX_FINALIZER_PYTHON", sys.executable)
 FINALIZER_SCRIPT = Path(__file__).with_name("finalize_docx.py")
 FIELD_FINALIZATION_TIMEOUT = int(os.getenv("FIELD_FINALIZATION_TIMEOUT", "90"))
-CONVERTER_PYTHON = os.getenv("DOCX_CONVERTER_PYTHON", sys.executable)
-CONVERTER_SCRIPT = Path(__file__).with_name("generate_docx_worker.py")
-DOCX_CONVERSION_TIMEOUT = int(os.getenv("DOCX_CONVERSION_TIMEOUT", "300"))
 USE_PROXY_DOWNLOAD_URLS = (
     os.getenv("USE_PROXY_DOWNLOAD_URLS", "true").lower() not in {"0", "false", "no"}
 )
 DOWNLOAD_LINK_EXPIRY_SECONDS = int(os.getenv("DOWNLOAD_LINK_EXPIRY_SECONDS", "7776000"))
 S3_PRESIGNED_URL_MAX_SECONDS = 604800
-GENERATION_LOCK = threading.Lock()
 
 app = FastAPI(
     title="Markdown Report to DOCX Plugin",
@@ -92,33 +86,6 @@ class RefreshDownloadResponse(BaseModel):
 def _authenticate(x_api_key: Optional[str]) -> None:
     if DOCX_API_KEY and x_api_key != DOCX_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key.")
-
-
-def _safe_file_stem(title: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9 _-]+", "", title).strip().replace(" ", "_")
-    cleaned = re.sub(r"_+", "_", cleaned)
-    return cleaned[:80] or "generated_report"
-
-
-def _unlink_quietly(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def _log_phase(message: str) -> None:
-    print(f"[docx-plugin] {message}", flush=True)
-
-
-def _child_process_env() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-    environment.setdefault("MALLOC_ARENA_MAX", "1")
-    environment.setdefault("OMP_NUM_THREADS", "1")
-    environment.setdefault("OPENBLAS_NUM_THREADS", "1")
-    environment.setdefault("SAL_USE_VCLPLUGIN", "svp")
-    return environment
 
 
 def _s3_client():
@@ -237,14 +204,12 @@ def _refreshed_download_url(file_name: str) -> str:
 def _finalize_fields(local_file: Path) -> None:
     if not FINALIZE_FIELDS:
         return
-    gc.collect()
-    _log_phase(f"field-finalization start file={local_file.name}")
     command = [
         FINALIZER_PYTHON,
         str(FINALIZER_SCRIPT),
         str(local_file),
         "--timeout",
-        str(FIELD_FINALIZATION_TIMEOUT),
+        str(min(FIELD_FINALIZATION_TIMEOUT, 60)),
     ]
     soffice_path = os.getenv("SOFFICE_PATH")
     if soffice_path:
@@ -253,59 +218,15 @@ def _finalize_fields(local_file: Path) -> None:
         subprocess.run(
             command,
             check=True,
+            capture_output=True,
+            text=True,
             timeout=FIELD_FINALIZATION_TIMEOUT,
-            env=_child_process_env(),
         )
-        _log_phase(f"field-finalization done file={local_file.name}")
     except subprocess.CalledProcessError as exc:
-        detail = f"LibreOffice finalizer exited with code {exc.returncode}."
+        detail = (exc.stderr or exc.stdout or "unknown LibreOffice error").strip()
         raise RuntimeError(f"Contents-page finalization failed: {detail}") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Contents-page finalization timed out.") from exc
-
-
-def _convert_in_worker(
-    markdown_text: str, title: str, local_file: Path, include_images: bool
-) -> dict[str, int]:
-    job_id = uuid.uuid4().hex[:10]
-    job_file = GENERATED_DIR / f"{local_file.stem}_{job_id}.job.json"
-    stats_file = GENERATED_DIR / f"{local_file.stem}_{job_id}.stats.json"
-    job = {
-        "formatted_markdown": markdown_text,
-        "title": title,
-        "include_images": include_images,
-    }
-    try:
-        job_file.write_text(json.dumps(job), encoding="utf-8")
-        _log_phase(f"conversion-worker start file={local_file.name}")
-        subprocess.run(
-            [
-                CONVERTER_PYTHON,
-                str(CONVERTER_SCRIPT),
-                str(job_file),
-                str(local_file),
-                str(stats_file),
-            ],
-            check=True,
-            timeout=DOCX_CONVERSION_TIMEOUT,
-            env=_child_process_env(),
-        )
-        stats = json.loads(stats_file.read_text(encoding="utf-8"))
-        _log_phase(f"conversion-worker done file={local_file.name}")
-        return {
-            "table_count": int(stats.get("table_count", 0)),
-            "image_count": int(stats.get("image_count", 0)),
-            "skipped_image_count": int(stats.get("skipped_image_count", 0)),
-        }
-    except subprocess.CalledProcessError as exc:
-        detail = f"conversion worker exited with code {exc.returncode}."
-        raise RuntimeError(f"DOCX conversion worker failed: {detail}") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("DOCX conversion worker timed out.") from exc
-    finally:
-        _unlink_quietly(job_file)
-        _unlink_quietly(stats_file)
-        gc.collect()
 
 
 @app.get("/")
@@ -324,9 +245,6 @@ def health() -> dict[str, str]:
         "status": "ok",
         "storage_mode": STORAGE_MODE,
         "field_finalization": "enabled" if FINALIZE_FIELDS else "disabled",
-        "isolated_conversion_worker": "enabled",
-        "docx_conversion_timeout_seconds": str(DOCX_CONVERSION_TIMEOUT),
-        "field_finalization_timeout_seconds": str(FIELD_FINALIZATION_TIMEOUT),
         "proxy_download_urls": "enabled" if USE_PROXY_DOWNLOAD_URLS else "disabled",
         "download_link_expiry_seconds": str(DOWNLOAD_LINK_EXPIRY_SECONDS),
     }
@@ -366,38 +284,33 @@ def generate_docx(payload: DocxRequest, x_api_key: Optional[str] = Header(None))
     if payload.to_format.lower() != "docx":
         raise HTTPException(status_code=400, detail="Only docx output is supported.")
 
-    markdown_text = payload.formatted_markdown
-    title = payload.title
-    include_images = payload.include_images
     unique_suffix = uuid.uuid4().hex[:10]
-    file_name = f"{_safe_file_stem(title)}_{unique_suffix}.docx"
+    file_name = f"{safe_file_stem(payload.title)}_{unique_suffix}.docx"
     local_file = GENERATED_DIR / file_name
     try:
-        with GENERATION_LOCK:
-            result = _convert_in_worker(
-                markdown_text,
-                title,
-                local_file,
-                include_images=include_images,
-            )
-            payload.formatted_markdown = ""
-            del markdown_text
-            gc.collect()
-            _finalize_fields(local_file)
-            _log_phase(f"publish start file={local_file.name}")
-            download_url = _publish_file(local_file, file_name)
-            _log_phase(f"publish done file={file_name}")
+        result = convert_markdown_to_docx(
+            payload.formatted_markdown,
+            payload.title,
+            local_file,
+            include_images=payload.include_images,
+        )
+        _finalize_fields(local_file)
+        download_url = _publish_file(local_file, file_name)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DOCX generation failed: {exc}") from exc
 
     return DocxResponse(
         download_url=download_url,
         file_name=file_name,
-        table_count=result["table_count"],
-        image_count=result["image_count"],
-        skipped_image_count=result["skipped_image_count"],
+        table_count=result.table_count,
+        image_count=result.image_count,
+        skipped_image_count=result.skipped_image_count,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
-        message="DOCX report generated with editable Word tables and finalized contents.",
+        message=(
+            "DOCX report generated with editable Word tables and finalized contents."
+            if FINALIZE_FIELDS
+            else "DOCX report generated with editable Word tables. Word fields are not finalized on the server."
+        ),
     )
 
 

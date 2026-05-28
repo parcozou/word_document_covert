@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import os
 from pathlib import Path
 import shutil
@@ -20,14 +19,6 @@ import uno
 WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 UPDATE_FIELDS = f"{{{WORD_NS}}}updateFields"
 VALUE_ATTRIBUTE = f"{{{WORD_NS}}}val"
-MEDIA_PREFIX = "word/media/"
-FIELD_RESULT_PARTS = {
-    "word/document.xml",
-    "word/_rels/document.xml.rels",
-}
-PLACEHOLDER_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-)
 
 
 def _property(name: str, value: object):
@@ -98,67 +89,24 @@ def _disable_open_refresh(docx_path: Path) -> None:
     temp_path.replace(docx_path)
 
 
-def _copy_with_placeholder_media(source_path: Path, target_path: Path) -> None:
-    """Create a layout-equivalent DOCX that is cheap for LibreOffice to open."""
-    with ZipFile(source_path, "r") as source, ZipFile(
-        target_path, "w", compression=ZIP_DEFLATED
-    ) as destination:
-        for info in source.infolist():
-            content = source.read(info.filename)
-            if info.filename.startswith(MEDIA_PREFIX):
-                content = PLACEHOLDER_PNG
-            destination.writestr(info, content)
-
-
-def _merge_finalized_field_parts(original_path: Path, finalized_path: Path) -> None:
-    """Copy finalized field XML back while keeping original chart media binaries."""
-    with ZipFile(finalized_path, "r") as finalized:
-        finalized_parts = {
-            name: finalized.read(name)
-            for name in FIELD_RESULT_PARTS
-            if name in finalized.namelist()
-        }
-    if "word/document.xml" not in finalized_parts:
-        raise RuntimeError("LibreOffice did not produce a finalized document XML part.")
-
-    temp_path = original_path.with_suffix(".fieldmerge.tmp.docx")
-    with ZipFile(original_path, "r") as original, ZipFile(
-        temp_path, "w", compression=ZIP_DEFLATED
-    ) as destination:
-        for info in original.infolist():
-            content = finalized_parts.get(info.filename)
-            if content is None:
-                content = original.read(info.filename)
-            destination.writestr(info, content)
-    temp_path.replace(original_path)
-
-
 def finalize_docx(
     docx_path: Path, soffice_path: str | None = None, timeout_seconds: int = 45
 ) -> None:
     docx_path = docx_path.resolve()
     if not docx_path.exists():
         raise FileNotFoundError(docx_path)
-    print(f"[docx-finalizer] start file={docx_path.name}", flush=True)
     soffice = _find_soffice(soffice_path)
     port = _open_port()
     with tempfile.TemporaryDirectory(prefix="docx_field_refresh_") as profile_dir:
-        layout_docx = Path(profile_dir) / f"{docx_path.stem}.layout.docx"
-        _copy_with_placeholder_media(docx_path, layout_docx)
-        print(f"[docx-finalizer] layout-light copy ready file={docx_path.name}", flush=True)
         profile_uri = Path(profile_dir).resolve().as_uri()
-        stored = False
         process = subprocess.Popen(
             [
                 soffice,
                 "--headless",
-                "--invisible",
                 "--nologo",
                 "--nodefault",
-                "--nolockcheck",
                 "--nofirststartwizard",
                 "--norestore",
-                "--quickstart=no",
                 f"-env:UserInstallation={profile_uri}",
                 (
                     f"--accept=socket,host=127.0.0.1,port={port};"
@@ -170,51 +118,34 @@ def finalize_docx(
         )
         try:
             desktop = _connect_desktop(port, timeout_seconds)
-            print(f"[docx-finalizer] connected file={docx_path.name}", flush=True)
             document = desktop.loadComponentFromURL(
-                layout_docx.as_uri(),
+                docx_path.as_uri(),
                 "_blank",
                 0,
                 (
                     _property("Hidden", True),
-                    # Avoid a duplicate full update on load; refresh fields explicitly below.
-                    _property("UpdateDocMode", 0),
+                    _property("UpdateDocMode", 3),
                 ),
             )
-            print(f"[docx-finalizer] refresh fields file={docx_path.name}", flush=True)
             document.TextFields.refresh()
             indexes = document.getDocumentIndexes()
             for index in range(indexes.getCount()):
                 indexes.getByIndex(index).update()
-            print(f"[docx-finalizer] store file={docx_path.name}", flush=True)
             document.storeAsURL(
-                layout_docx.as_uri(),
+                docx_path.as_uri(),
                 (
                     _property("FilterName", "Office Open XML Text"),
                     _property("Overwrite", True),
                 ),
             )
-            stored = True
         finally:
-            try:
-                if "document" in locals() and document is not None:
-                    try:
-                        document.close(True)
-                    except Exception:
-                        document.dispose()
-            except Exception:
-                pass
             process.terminate()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-        if stored:
-            print(f"[docx-finalizer] merge finalized fields file={docx_path.name}", flush=True)
-            _merge_finalized_field_parts(docx_path, layout_docx)
     _disable_open_refresh(docx_path)
-    print(f"[docx-finalizer] done file={docx_path.name}", flush=True)
 
 
 def main() -> None:
