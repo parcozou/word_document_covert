@@ -13,8 +13,6 @@ import subprocess
 import sys
 import time
 import uuid
-from zipfile import ZIP_DEFLATED, ZipFile
-import xml.etree.ElementTree as ET
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -33,7 +31,6 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("
 STORAGE_MODE = os.getenv("STORAGE_MODE", "local").lower()
 DOCX_API_KEY = os.getenv("DOCX_API_KEY", "")
 FINALIZE_FIELDS = os.getenv("FINALIZE_FIELDS", "true").lower() not in {"0", "false", "no"}
-DOCX_FINALIZATION_MODE = os.getenv("DOCX_FINALIZATION_MODE", "static").lower()
 FINALIZER_PYTHON = os.getenv("DOCX_FINALIZER_PYTHON", sys.executable)
 FINALIZER_SCRIPT = Path(__file__).with_name("finalize_docx.py")
 FIELD_FINALIZATION_TIMEOUT = int(os.getenv("FIELD_FINALIZATION_TIMEOUT", "90"))
@@ -42,9 +39,6 @@ USE_PROXY_DOWNLOAD_URLS = (
 )
 DOWNLOAD_LINK_EXPIRY_SECONDS = int(os.getenv("DOWNLOAD_LINK_EXPIRY_SECONDS", "7776000"))
 S3_PRESIGNED_URL_MAX_SECONDS = 604800
-WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-UPDATE_FIELDS = f"{{{WORD_NS}}}updateFields"
-VALUE_ATTRIBUTE = f"{{{WORD_NS}}}val"
 
 app = FastAPI(
     title="Markdown Report to DOCX Plugin",
@@ -207,31 +201,9 @@ def _refreshed_download_url(file_name: str) -> str:
     return f"{PUBLIC_BASE_URL}/files/{quote(file_name)}"
 
 
-def _disable_open_field_refresh(local_file: Path) -> None:
-    temp_path = local_file.with_suffix(".settings.tmp.docx")
-    with ZipFile(local_file, "r") as source, ZipFile(
-        temp_path, "w", ZIP_DEFLATED
-    ) as destination:
-        for info in source.infolist():
-            content = source.read(info.filename)
-            if info.filename == "word/settings.xml":
-                root = ET.fromstring(content)
-                update_fields = root.find(UPDATE_FIELDS)
-                if update_fields is None:
-                    update_fields = ET.SubElement(root, UPDATE_FIELDS)
-                update_fields.set(VALUE_ATTRIBUTE, "false")
-                content = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-            destination.writestr(info, content)
-    temp_path.replace(local_file)
-
-
-def _finalize_fields(local_file: Path) -> str:
-    if (
-        not FINALIZE_FIELDS
-        or DOCX_FINALIZATION_MODE in {"", "off", "none", "static", "low-memory"}
-    ):
-        _disable_open_field_refresh(local_file)
-        return "static"
+def _finalize_fields(local_file: Path) -> None:
+    if not FINALIZE_FIELDS:
+        return
     command = [
         FINALIZER_PYTHON,
         str(FINALIZER_SCRIPT),
@@ -242,10 +214,6 @@ def _finalize_fields(local_file: Path) -> str:
     soffice_path = os.getenv("SOFFICE_PATH")
     if soffice_path:
         command.extend(["--soffice", soffice_path])
-    environment = os.environ.copy()
-    environment.setdefault("MALLOC_ARENA_MAX", "2")
-    environment.setdefault("SAL_USE_VCLPLUGIN", "gen")
-    environment.setdefault("JAVA_TOOL_OPTIONS", "-Xmx64m")
     try:
         subprocess.run(
             command,
@@ -253,20 +221,12 @@ def _finalize_fields(local_file: Path) -> str:
             capture_output=True,
             text=True,
             timeout=FIELD_FINALIZATION_TIMEOUT,
-            env=environment,
         )
-        return "libreoffice"
     except subprocess.CalledProcessError as exc:
-        if DOCX_FINALIZATION_MODE == "libreoffice-strict":
-            detail = (exc.stderr or exc.stdout or "unknown LibreOffice error").strip()
-            raise RuntimeError(f"Contents-page finalization failed: {detail}") from exc
-        _disable_open_field_refresh(local_file)
-        return "static-fallback"
+        detail = (exc.stderr or exc.stdout or "unknown LibreOffice error").strip()
+        raise RuntimeError(f"Contents-page finalization failed: {detail}") from exc
     except subprocess.TimeoutExpired as exc:
-        if DOCX_FINALIZATION_MODE == "libreoffice-strict":
-            raise RuntimeError("Contents-page finalization timed out.") from exc
-        _disable_open_field_refresh(local_file)
-        return "static-fallback"
+        raise RuntimeError("Contents-page finalization timed out.") from exc
 
 
 @app.get("/")
@@ -285,7 +245,6 @@ def health() -> dict[str, str]:
         "status": "ok",
         "storage_mode": STORAGE_MODE,
         "field_finalization": "enabled" if FINALIZE_FIELDS else "disabled",
-        "docx_finalization_mode": DOCX_FINALIZATION_MODE,
         "proxy_download_urls": "enabled" if USE_PROXY_DOWNLOAD_URLS else "disabled",
         "download_link_expiry_seconds": str(DOWNLOAD_LINK_EXPIRY_SECONDS),
     }
@@ -335,7 +294,7 @@ def generate_docx(payload: DocxRequest, x_api_key: Optional[str] = Header(None))
             local_file,
             include_images=payload.include_images,
         )
-        finalization_mode = _finalize_fields(local_file)
+        _finalize_fields(local_file)
         download_url = _publish_file(local_file, file_name)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DOCX generation failed: {exc}") from exc
@@ -347,10 +306,7 @@ def generate_docx(payload: DocxRequest, x_api_key: Optional[str] = Header(None))
         image_count=result.image_count,
         skipped_image_count=result.skipped_image_count,
         generated_at_utc=datetime.now(timezone.utc).isoformat(),
-        message=(
-            "DOCX report generated with editable Word tables "
-            f"and {finalization_mode} contents settings."
-        ),
+        message="DOCX report generated with editable Word tables and finalized contents.",
     )
 
 
