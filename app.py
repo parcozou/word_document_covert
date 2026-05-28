@@ -236,7 +236,6 @@ def root() -> dict[str, str]:
         "service": "Markdown Report to DOCX Plugin",
         "health_check": "/health",
         "generate_docx": "/generate-docx",
-        "refresh_download_url": "/refreshDownloadUrl",
     }
 
 
@@ -311,8 +310,7 @@ def generate_docx(payload: DocxRequest, x_api_key: Optional[str] = Header(None))
     )
 
 
-@app.post("/refreshDownloadUrl", response_model=RefreshDownloadResponse)
-@app.post("/refresh-download-url", response_model=RefreshDownloadResponse, include_in_schema=False)
+@app.post("/refresh-download-url", response_model=RefreshDownloadResponse)
 def refresh_download_url(
     payload: RefreshDownloadRequest, x_api_key: Optional[str] = Header(None)
 ) -> RefreshDownloadResponse:

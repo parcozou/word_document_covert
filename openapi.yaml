@@ -31,7 +31,7 @@ paths:
           description: Invalid API key.
         '500':
           description: Generation or storage error.
-  /refreshDownloadUrl:
+  /refresh-download-url:
     post:
       operationId: refreshDownloadUrl
       summary: Refresh a download URL for an existing generated DOCX
