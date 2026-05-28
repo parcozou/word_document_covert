@@ -10,8 +10,6 @@ import argparse
 import json
 from pathlib import Path
 
-from docx_converter import convert_markdown_to_docx
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -20,13 +18,19 @@ def main() -> None:
     parser.add_argument("stats_file", type=Path)
     args = parser.parse_args()
 
+    print(f"[docx-worker] load job={args.job_file.name}", flush=True)
     job = json.loads(args.job_file.read_text(encoding="utf-8-sig"))
+    print(f"[docx-worker] import converter output={args.output_file.name}", flush=True)
+    from docx_converter import convert_markdown_to_docx
+
+    print(f"[docx-worker] convert start output={args.output_file.name}", flush=True)
     result = convert_markdown_to_docx(
         job["formatted_markdown"],
         job["title"],
         args.output_file,
         include_images=bool(job.get("include_images", True)),
     )
+    print(f"[docx-worker] convert done output={args.output_file.name}", flush=True)
     args.stats_file.write_text(
         json.dumps(
             {

@@ -107,6 +107,10 @@ def _unlink_quietly(path: Path) -> None:
         pass
 
 
+def _log_phase(message: str) -> None:
+    print(f"[docx-plugin] {message}", flush=True)
+
+
 def _child_process_env() -> dict[str, str]:
     environment = os.environ.copy()
     environment.setdefault("PYTHONDONTWRITEBYTECODE", "1")
@@ -234,6 +238,7 @@ def _finalize_fields(local_file: Path) -> None:
     if not FINALIZE_FIELDS:
         return
     gc.collect()
+    _log_phase(f"field-finalization start file={local_file.name}")
     command = [
         FINALIZER_PYTHON,
         str(FINALIZER_SCRIPT),
@@ -248,13 +253,12 @@ def _finalize_fields(local_file: Path) -> None:
         subprocess.run(
             command,
             check=True,
-            capture_output=True,
-            text=True,
             timeout=FIELD_FINALIZATION_TIMEOUT,
             env=_child_process_env(),
         )
+        _log_phase(f"field-finalization done file={local_file.name}")
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "unknown LibreOffice error").strip()
+        detail = f"LibreOffice finalizer exited with code {exc.returncode}."
         raise RuntimeError(f"Contents-page finalization failed: {detail}") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Contents-page finalization timed out.") from exc
@@ -273,6 +277,7 @@ def _convert_in_worker(
     }
     try:
         job_file.write_text(json.dumps(job), encoding="utf-8")
+        _log_phase(f"conversion-worker start file={local_file.name}")
         subprocess.run(
             [
                 CONVERTER_PYTHON,
@@ -282,20 +287,19 @@ def _convert_in_worker(
                 str(stats_file),
             ],
             check=True,
-            capture_output=True,
-            text=True,
             timeout=DOCX_CONVERSION_TIMEOUT,
             env=_child_process_env(),
         )
         stats = json.loads(stats_file.read_text(encoding="utf-8"))
+        _log_phase(f"conversion-worker done file={local_file.name}")
         return {
             "table_count": int(stats.get("table_count", 0)),
             "image_count": int(stats.get("image_count", 0)),
             "skipped_image_count": int(stats.get("skipped_image_count", 0)),
         }
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "unknown conversion worker error").strip()
-        raise RuntimeError(f"DOCX conversion worker failed: {detail[-1600:]}") from exc
+        detail = f"conversion worker exited with code {exc.returncode}."
+        raise RuntimeError(f"DOCX conversion worker failed: {detail}") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("DOCX conversion worker timed out.") from exc
     finally:
@@ -380,7 +384,9 @@ def generate_docx(payload: DocxRequest, x_api_key: Optional[str] = Header(None))
             del markdown_text
             gc.collect()
             _finalize_fields(local_file)
+            _log_phase(f"publish start file={local_file.name}")
             download_url = _publish_file(local_file, file_name)
+            _log_phase(f"publish done file={file_name}")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DOCX generation failed: {exc}") from exc
 

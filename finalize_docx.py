@@ -95,6 +95,7 @@ def finalize_docx(
     docx_path = docx_path.resolve()
     if not docx_path.exists():
         raise FileNotFoundError(docx_path)
+    print(f"[docx-finalizer] start file={docx_path.name}", flush=True)
     soffice = _find_soffice(soffice_path)
     port = _open_port()
     with tempfile.TemporaryDirectory(prefix="docx_field_refresh_") as profile_dir:
@@ -121,6 +122,7 @@ def finalize_docx(
         )
         try:
             desktop = _connect_desktop(port, timeout_seconds)
+            print(f"[docx-finalizer] connected file={docx_path.name}", flush=True)
             document = desktop.loadComponentFromURL(
                 docx_path.as_uri(),
                 "_blank",
@@ -131,10 +133,12 @@ def finalize_docx(
                     _property("UpdateDocMode", 0),
                 ),
             )
+            print(f"[docx-finalizer] refresh fields file={docx_path.name}", flush=True)
             document.TextFields.refresh()
             indexes = document.getDocumentIndexes()
             for index in range(indexes.getCount()):
                 indexes.getByIndex(index).update()
+            print(f"[docx-finalizer] store file={docx_path.name}", flush=True)
             document.storeAsURL(
                 docx_path.as_uri(),
                 (
@@ -158,6 +162,7 @@ def finalize_docx(
                 process.kill()
                 process.wait(timeout=5)
     _disable_open_refresh(docx_path)
+    print(f"[docx-finalizer] done file={docx_path.name}", flush=True)
 
 
 def main() -> None:
