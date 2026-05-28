@@ -31,6 +31,31 @@ paths:
           description: Invalid API key.
         '500':
           description: Generation or storage error.
+  /refresh-download-url:
+    post:
+      operationId: refreshDownloadUrl
+      summary: Refresh a download URL for an existing generated DOCX
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshDownloadRequest'
+      responses:
+        '200':
+          description: Refreshed document link.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshDownloadResponse'
+        '401':
+          description: Invalid API key.
+        '404':
+          description: Existing generated document was not found.
+        '500':
+          description: Refresh error.
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -82,6 +107,32 @@ components:
           type: integer
         skipped_image_count:
           type: integer
+        generated_at_utc:
+          type: string
+        message:
+          type: string
+    RefreshDownloadRequest:
+      type: object
+      required:
+        - file_name
+      properties:
+        file_name:
+          type: string
+          description: Existing generated DOCX file name returned by generateDocxReport.
+    RefreshDownloadResponse:
+      type: object
+      required:
+        - download_url
+        - file_name
+        - generated_at_utc
+        - message
+      properties:
+        download_url:
+          type: string
+          format: uri
+          description: Refreshed downloadable DOCX file URL.
+        file_name:
+          type: string
         generated_at_utc:
           type: string
         message:

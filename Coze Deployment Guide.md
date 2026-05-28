@@ -101,10 +101,11 @@ FINALIZE_FIELDS=true
 
 ### 4.2 Recommended Production Setup
 
-Use a private S3-compatible bucket, such as Cloudflare R2 or AWS S3. The API uploads each DOCX and returns an expiring signed URL. For analysis reports, this is preferable to a permanently public file URL.
+Use a private S3-compatible bucket, such as Cloudflare R2 or AWS S3. The API uploads each DOCX to object storage and, by default, returns an API-hosted download link that remains valid for three months. This avoids relying on a long R2/S3 presigned URL, because S3-compatible presigned URLs cannot be safely extended to three months.
 
 ```env
 STORAGE_MODE=s3
+PUBLIC_BASE_URL=https://your-service.onrender.com
 DOCX_API_KEY=replace-with-a-long-random-token
 IMAGE_HOST_ALLOWLIST=lf-bot-studio-plugin-resource.coze.cn
 S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com
@@ -113,11 +114,25 @@ S3_REGION=auto
 S3_ACCESS_KEY_ID=<access-key-id>
 S3_SECRET_ACCESS_KEY=<secret-access-key>
 S3_KEY_PREFIX=generated-docx
-S3_URL_EXPIRY_SECONDS=86400
+USE_PROXY_DOWNLOAD_URLS=true
+DOWNLOAD_LINK_EXPIRY_SECONDS=7776000
+DOWNLOAD_LINK_SECRET=replace-with-a-long-random-token-or-use-DOCX_API_KEY
 FINALIZE_FIELDS=true
 ```
 
-Leave `S3_PUBLIC_BASE_URL` unset for private reports. When it is unset, the existing API returns a signed download URL. In `s3` mode, the API deletes its local temporary DOCX copy after a successful upload and does not expose the local `/files` route. Cloudflare states that R2 presigned URLs operate on its S3 API domain and should be treated as bearer links until they expire.
+Leave `S3_PUBLIC_BASE_URL` unset for private reports. When it is unset and `USE_PROXY_DOWNLOAD_URLS=true`, the plugin returns a link like `/download/<file_name>?expires=...&signature=...`. When the user opens that link, the API verifies the signature and streams the file from R2/S3. The default `DOWNLOAD_LINK_EXPIRY_SECONDS=7776000` equals 90 days.
+
+If `USE_PROXY_DOWNLOAD_URLS=false`, the API falls back to a native R2/S3 presigned URL. Keep `S3_URL_EXPIRY_SECONDS` at or below `604800` seconds (7 days). Cloudflare states that R2 presigned URLs operate on its S3 API domain and should be treated as bearer links until they expire; they cannot be extended after creation.
+
+Expired generated links cannot be edited in place. If the object still exists in R2/S3, generate a new download link by rerunning the report workflow or by calling `POST /refresh-download-url` with the existing `file_name`. If the object has been deleted by a lifecycle rule or manual cleanup, the document must be regenerated.
+
+Refresh example:
+
+```json
+{
+  "file_name": "Corporate_Valuation_Report_abc123.docx"
+}
+```
 
 For local testing, the API loads a `.env` file in this folder automatically. When deploying on Render or another host, enter these values in the host's secret environment-variable settings; do not commit `.env` or raw R2 credential files to source control.
 
