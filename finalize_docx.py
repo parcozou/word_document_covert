@@ -103,10 +103,13 @@ def finalize_docx(
             [
                 soffice,
                 "--headless",
+                "--invisible",
                 "--nologo",
                 "--nodefault",
+                "--nolockcheck",
                 "--nofirststartwizard",
                 "--norestore",
+                "--quickstart=no",
                 f"-env:UserInstallation={profile_uri}",
                 (
                     f"--accept=socket,host=127.0.0.1,port={port};"
@@ -124,7 +127,8 @@ def finalize_docx(
                 0,
                 (
                     _property("Hidden", True),
-                    _property("UpdateDocMode", 3),
+                    # Avoid a duplicate full update on load; refresh fields explicitly below.
+                    _property("UpdateDocMode", 0),
                 ),
             )
             document.TextFields.refresh()
@@ -139,6 +143,14 @@ def finalize_docx(
                 ),
             )
         finally:
+            try:
+                if "document" in locals() and document is not None:
+                    try:
+                        document.close(True)
+                    except Exception:
+                        document.dispose()
+            except Exception:
+                pass
             process.terminate()
             try:
                 process.wait(timeout=5)
